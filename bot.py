@@ -1,9 +1,8 @@
 import logging
 import os
-import asyncio
 from flask import Flask, request, jsonify
 from telegram import Update, Bot
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackContext
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -18,7 +17,6 @@ waiting_for_address = {}
 
 # Создаём экземпляр бота
 bot = Bot(token=TOKEN)
-application = Application.builder().token(TOKEN).build()
 
 # --- Обработчики команд ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -94,7 +92,8 @@ async def handle_address(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Если пользователь не ждёт адрес, просто игнорируем
         pass
 
-# --- Настройка обработчиков ---
+# --- Создаём приложение и добавляем обработчики ---
+application = Application.builder().token(TOKEN).build()
 application.add_handler(CommandHandler("start", start))
 application.add_handler(CommandHandler("electronic", order_electronic))
 application.add_handler(CommandHandler("printed", order_printed))
@@ -102,11 +101,14 @@ application.add_handler(CommandHandler("both", order_both))
 application.add_handler(CommandHandler("cancel", cancel))
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_address))
 
+# --- Инициализируем приложение (важно!) ---
+application.initialize()
+
 # --- Flask приложение ---
 flask_app = Flask(__name__)
 
 @flask_app.route('/webhook', methods=['POST'])
-async def webhook():
+def webhook():
     """Принимает данные из Tilda (для заказов)"""
     data = request.get_json()
     logging.info(f"Получены данные из Tilda: {data}")
@@ -117,8 +119,12 @@ async def webhook():
 def telegram_webhook():
     """Принимает обновления от Telegram"""
     try:
-        update = Update.de_json(request.get_json(force=True), bot)
-        asyncio.run(application.process_update(update))
+        # Получаем JSON из запроса
+        json_data = request.get_json(force=True)
+        # Создаём объект Update
+        update = Update.de_json(json_data, bot)
+        # Обрабатываем обновление (application уже инициализирован)
+        application.process_update(update)
         return jsonify({"status": "ok"}), 200
     except Exception as e:
         logging.error(f"Ошибка в вебхуке Telegram: {e}")
