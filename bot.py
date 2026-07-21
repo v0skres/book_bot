@@ -1,48 +1,23 @@
 import logging
 import os
-import threading
-from flask import Flask, jsonify
-from telegram.request import HTTPXRequest
 from telegram import Update
-from telegram.ext import (
-    ApplicationBuilder,
-    CommandHandler,
-    MessageHandler,
-    filters,
-    ContextTypes,
-)
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram.request import HTTPXRequest
 from dotenv import load_dotenv
 
 load_dotenv()
 
 TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID"))
+BOOK_FILE = os.getenv("BOOK_FILE_PATH", "book.pdf")
 
 logging.basicConfig(level=logging.INFO)
 
 waiting_for_address = {}
 
-# --- Flask-приложение для "keep-alive" ---
-app = Flask(__name__)
-
-@app.route('/')
-def home():
-    return jsonify({"status": "bot is running"}), 200
-
-@app.route('/health')
-def health():
-    return jsonify({"status": "healthy"}), 200
-
-# --- Обработчик команды /start ---
+# --- Обработчики команд (оставляем как было) ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "👋 Привет! Я бот для выдачи книги «О чём зудят твои таланты?».\n\n"
-        "Доступные команды:\n"
-        "/electronic — получить электронную книгу\n"
-        "/printed — заказать печатную книгу (запрос адреса)\n"
-        "/both — получить электронную и заказать печатную\n"
-        "/cancel — отменить запрос адреса"
-    )
+    await update.message.reply_text(...)
 
 # --- Команды ---
 async def order_electronic(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -111,26 +86,29 @@ async def handle_address(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pass
 
 # --- Главная функция бота ---
-def run_bot():
+def main():
+    # Создаём приложение
     request = HTTPXRequest(connect_timeout=30.0, read_timeout=30.0)
     application = ApplicationBuilder().token(TOKEN).request(request).build()
 
+    # Добавляем обработчики
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("electronic", order_electronic))
     application.add_handler(CommandHandler("printed", order_printed))
     application.add_handler(CommandHandler("both", order_both))
     application.add_handler(CommandHandler("cancel", cancel))
-
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_address))
 
-    print("✅ Бот запущен и готов к работе...")
-    application.run_polling()
+    # Получаем порт из переменной окружения (Render задаёт PORT)
+    port = int(os.environ.get('PORT', 10000))
+    
+    # Запускаем бота в режиме вебхука
+    application.run_webhook(
+        listen='0.0.0.0',
+        port=port,
+        url_path=TOKEN,  # Путь для вебхука (можно любой)
+        webhook_url=f'https://future-mission-book-bot.onrender.com/{TOKEN}'  # URL твоего бота + токен
+    )
 
-# --- Запуск ---
 if __name__ == "__main__":
-    # Запускаем бота в отдельном потоке
-    bot_thread = threading.Thread(target=run_bot)
-    bot_thread.start()
-
-    # Запускаем Flask-сервер для keep-alive (порт 5000)
-    app.run(host='0.0.0.0', port=5000)
+    main()
