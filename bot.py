@@ -1,11 +1,10 @@
 import logging
 import os
+import asyncio
 from flask import Flask, request, jsonify
 from telegram import Update, Bot
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from dotenv import load_dotenv
-
-import asyncio
 
 load_dotenv()
 
@@ -17,8 +16,12 @@ logging.basicConfig(level=logging.INFO)
 # Состояния пользователей (ждём ли адрес)
 waiting_for_address = {}
 
-# Создаём экземпляр бота
+# Создаём экземпляр бота и приложения
 bot = Bot(token=TOKEN)
+application = Application.builder().token(TOKEN).build()
+
+# --- Инициализация приложения (синхронно) ---
+asyncio.run(application.initialize())
 
 # --- Обработчики команд ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -91,20 +94,15 @@ async def handle_address(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         waiting_for_address[user_id] = False
     else:
-        # Если пользователь не ждёт адрес, просто игнорируем
         pass
 
-# --- Создаём приложение и добавляем обработчики ---
-application = Application.builder().token(TOKEN).build()
+# --- Регистрация обработчиков в приложении ---
 application.add_handler(CommandHandler("start", start))
 application.add_handler(CommandHandler("electronic", order_electronic))
 application.add_handler(CommandHandler("printed", order_printed))
 application.add_handler(CommandHandler("both", order_both))
 application.add_handler(CommandHandler("cancel", cancel))
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_address))
-
-# --- Инициализируем приложение (важно!) ---
-application.initialize()
 
 # --- Flask приложение ---
 flask_app = Flask(__name__)
@@ -119,10 +117,11 @@ def webhook():
 
 @flask_app.route('/telegram-webhook', methods=['POST'])
 def telegram_webhook():
+    """Принимает обновления от Telegram"""
     try:
         json_data = request.get_json(force=True)
         update = Update.de_json(json_data, bot)
-        asyncio.run(application.process_update(update))  # <-- добавляем asyncio.run()
+        asyncio.run(application.process_update(update))
         return jsonify({"status": "ok"}), 200
     except Exception as e:
         logging.error(f"Ошибка в вебхуке Telegram: {e}")
@@ -130,6 +129,7 @@ def telegram_webhook():
 
 @flask_app.route('/set-webhook', methods=['GET'])
 def set_webhook():
+    """Устанавливает вебхук для бота"""
     webhook_url = f"https://future-mission-book-bot.onrender.com/telegram-webhook"
     try:
         asyncio.run(bot.set_webhook(url=webhook_url))
@@ -138,5 +138,4 @@ def set_webhook():
         return jsonify({"error": str(e)}), 500
 
 if __name__ == "__main__":
-    # Запускаем Flask-сервер на порту 10000 (стандартный для Render)
     flask_app.run(host='0.0.0.0', port=10000)
