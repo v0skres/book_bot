@@ -5,6 +5,8 @@ from telegram import Update, Bot
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from dotenv import load_dotenv
 
+import asyncio
+
 load_dotenv()
 
 TOKEN = os.getenv("BOT_TOKEN")
@@ -117,14 +119,10 @@ def webhook():
 
 @flask_app.route('/telegram-webhook', methods=['POST'])
 def telegram_webhook():
-    """Принимает обновления от Telegram"""
     try:
-        # Получаем JSON из запроса
         json_data = request.get_json(force=True)
-        # Создаём объект Update
         update = Update.de_json(json_data, bot)
-        # Обрабатываем обновление (application уже инициализирован)
-        application.process_update(update)
+        asyncio.run(application.process_update(update))  # <-- добавляем asyncio.run()
         return jsonify({"status": "ok"}), 200
     except Exception as e:
         logging.error(f"Ошибка в вебхуке Telegram: {e}")
@@ -132,10 +130,9 @@ def telegram_webhook():
 
 @flask_app.route('/set-webhook', methods=['GET'])
 def set_webhook():
-    """Устанавливает вебхук для бота"""
     webhook_url = f"https://future-mission-book-bot.onrender.com/telegram-webhook"
     try:
-        bot.set_webhook(url=webhook_url)
+        asyncio.run(bot.set_webhook(url=webhook_url))
         return jsonify({"status": "webhook set successfully"}), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
