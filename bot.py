@@ -9,7 +9,7 @@ load_dotenv()
 
 TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID"))
-BOOK_FILE = os.getenv("BOOK_FILE_PATH", "book.pdf")
+BOOK_FILE = os.getenv("BOOK_FILE_PATH", "book.txt")
 
 logging.basicConfig(level=logging.INFO)
 
