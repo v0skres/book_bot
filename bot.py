@@ -16,12 +16,8 @@ logging.basicConfig(level=logging.INFO)
 # Состояния пользователей (ждём ли адрес)
 waiting_for_address = {}
 
-# Создаём экземпляр бота и приложения
-bot = Bot(token=TOKEN)
+# Создаём приложение
 application = Application.builder().token(TOKEN).build()
-
-# --- Инициализация приложения (синхронно) ---
-asyncio.run(application.initialize())
 
 # --- Обработчики команд ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -96,7 +92,7 @@ async def handle_address(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         pass
 
-# --- Регистрация обработчиков в приложении ---
+# --- Регистрация обработчиков ---
 application.add_handler(CommandHandler("start", start))
 application.add_handler(CommandHandler("electronic", order_electronic))
 application.add_handler(CommandHandler("printed", order_printed))
@@ -112,16 +108,27 @@ def webhook():
     """Принимает данные из Tilda (для заказов)"""
     data = request.get_json()
     logging.info(f"Получены данные из Tilda: {data}")
-    # Здесь будет обработка заказов из Tilda (позже)
     return jsonify({"status": "ok"}), 200
 
 @flask_app.route('/telegram-webhook', methods=['POST'])
 def telegram_webhook():
-    """Принимает обновления от Telegram"""
+    """
+    Принимает обновления от Telegram.
+    Инициализируем приложение и обрабатываем каждое обновление в отдельном цикле.
+    """
     try:
         json_data = request.get_json(force=True)
-        update = Update.de_json(json_data, bot)
-        asyncio.run(application.process_update(update))
+        update = Update.de_json(json_data, application.bot)
+
+        # Инициализируем приложение (если ещё не инициализировано)
+        # и обрабатываем обновление в одном событийном цикле
+        async def process_update():
+            await application.initialize()
+            await application.process_update(update)
+            await application.shutdown()
+
+        asyncio.run(process_update())
+
         return jsonify({"status": "ok"}), 200
     except Exception as e:
         logging.error(f"Ошибка в вебхуке Telegram: {e}")
@@ -132,9 +139,15 @@ def set_webhook():
     """Устанавливает вебхук для бота"""
     webhook_url = f"https://future-mission-book-bot.onrender.com/telegram-webhook"
     try:
-        asyncio.run(bot.set_webhook(url=webhook_url))
+        async def set_webhook_async():
+            await application.initialize()
+            await application.bot.set_webhook(url=webhook_url)
+            await application.shutdown()
+
+        asyncio.run(set_webhook_async())
         return jsonify({"status": "webhook set successfully"}), 200
     except Exception as e:
+        logging.error(f"Ошибка установки вебхука: {e}")
         return jsonify({"error": str(e)}), 500
 
 if __name__ == "__main__":
