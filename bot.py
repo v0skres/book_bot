@@ -1,6 +1,7 @@
 import logging
 import os
 import asyncio
+import json
 from flask import Flask, request, jsonify
 from telegram import Update, Bot
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
@@ -105,10 +106,116 @@ flask_app = Flask(__name__)
 
 @flask_app.route('/webhook', methods=['POST'])
 def webhook():
-    """Принимает данные из Tilda (для заказов)"""
-    data = request.get_json()
-    logging.info(f"Получены данные из Tilda: {data}")
-    return jsonify({"status": "ok"}), 200
+    """Принимает данные из формы Tilda (универсальный обработчик)"""
+    try:
+        # Определяем Content-Type
+        content_type = request.headers.get('Content-Type', '').lower()
+        
+        # Если это JSON — парсим как JSON
+        if 'application/json' in content_type:
+            data = request.get_json()
+        # Если это form-data или x-www-form-urlencoded
+        elif 'application/x-www-form-urlencoded' in content_type or 'multipart/form-data' in content_type:
+            data = request.form.to_dict()
+        # Если ничего не подходит — пробуем получить данные из request.get_data()
+        else:
+            raw_data = request.get_data(as_text=True)
+            logging.info(f"Raw data: {raw_data}")
+            # Пробуем распарсить как URL-encoded
+            from urllib.parse import parse_qs
+            parsed = parse_qs(raw_data)
+            data = {k: v[0] if len(v) == 1 else v for k, v in parsed.items()}
+            
+            # Если не получилось — возможно, это JSON в теле
+            if not data and raw_data:
+                try:
+                    data = json.loads(raw_data)
+                except:
+                    data = {'raw': raw_data}
+
+        logging.info(f"Получены данные из Tilda: {data}")
+
+        # Извлекаем данные клиента
+        client_name = data.get('Name', data.get('name', 'Не указано'))
+        client_email = data.get('Email', data.get('email', 'Не указано'))
+        client_phone = data.get('Phone', data.get('phone', 'Не указано'))
+        
+        # Пробуем получить товары (Tilda может отправлять их по-разному)
+        product_name = data.get('product_name', '') or data.get('product', '') or data.get('product_title', '') or data.get('title', '')
+        product_price = data.get('product_price', '') or data.get('price', '') or data.get('amount', '')
+
+        # Если товары передаются массивом
+        if not product_name and 'products' in data:
+            products = data.get('products', [])
+            if isinstance(products, list) and products:
+                product_name = ', '.join([p.get('name', p.get('title', '')) for p in products])
+                product_price = ', '.join([p.get('price', '') for p in products])
+
+        # Определяем тип заказа
+        order_type = 'unknown'
+        product_lower = product_name.lower() if product_name else ''
+        
+        if 'электрон' in product_lower and 'печатн' in product_lower:
+            order_type = 'both'
+        elif 'электрон' in product_lower:
+            order_type = 'electronic'
+        elif 'печатн' in product_lower:
+            order_type = 'printed'
+        elif 'книга' in product_lower:
+            # Если просто «книга» — по умолчанию электронная
+            order_type = 'electronic'
+
+        # Отправляем уведомление менеджеру
+        message = (
+            f"📦 **Новый заказ книги!**\n"
+            f"Клиент: {client_name}\n"
+            f"Телефон: {client_phone}\n"
+            f"Email: {client_email}\n"
+            f"Товар: {product_name}\n"
+            f"Цена: {product_price}\n"
+            f"Тип: {order_type}"
+        )
+
+        # Асинхронная отправка уведомления
+        async def send_notification():
+            await application.initialize()
+            await application.bot.send_message(chat_id=ADMIN_CHAT_ID, text=message)
+            await application.shutdown()
+
+        asyncio.run(send_notification())
+
+        # Дополнительные инструкции для менеджера
+        async def send_extra():
+            await application.initialize()
+            if order_type == 'printed':
+                await application.bot.send_message(
+                    chat_id=ADMIN_CHAT_ID,
+                    text="📌 **Печатная книга.** Свяжитесь с клиентом для уточнения адреса ПВЗ."
+                )
+            elif order_type == 'both':
+                await application.bot.send_message(
+                    chat_id=ADMIN_CHAT_ID,
+                    text="📌 **Электронная + печатная.** Отправьте электронную книгу на email клиента и свяжитесь для уточнения адреса."
+                )
+            elif order_type == 'electronic':
+                await application.bot.send_message(
+                    chat_id=ADMIN_CHAT_ID,
+                    text="📌 **Электронная книга.** Отправьте файл на email клиента."
+                )
+            else:
+                await application.bot.send_message(
+                    chat_id=ADMIN_CHAT_ID,
+                    text="⚠️ Не удалось определить тип заказа. Проверьте вручную."
+                )
+            await application.shutdown()
+
+        asyncio.run(send_extra())
+
+        return jsonify({"status": "ok", "message": "Заказ обработан"}), 200
+
+    except Exception as e:
+        logging.error(f"Ошибка в вебхуке: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 @flask_app.route('/telegram-webhook', methods=['POST'])
 def telegram_webhook():
