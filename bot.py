@@ -20,14 +20,6 @@ processed_orders = set()
 # Создаём отдельный экземпляр Bot для отправки сообщений из вебхука
 bot = Bot(token=TOKEN)
 
-# --- Функция для синхронной отправки сообщений ---
-def send_telegram_message(text):
-    """Отправляет сообщение в Telegram (синхронно)"""
-    try:
-        asyncio.run(bot.send_message(chat_id=ADMIN_CHAT_ID, text=text))
-    except Exception as e:
-        logging.error(f"Ошибка отправки сообщения: {e}")
-
 # --- Обработчики команд для бота (polling) ---
 async def start(update, context):
     await update.message.reply_text(
