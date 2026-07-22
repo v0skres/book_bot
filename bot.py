@@ -17,8 +17,17 @@ logging.basicConfig(level=logging.INFO)
 # Состояния пользователей (ждём ли адрес)
 waiting_for_address = {}
 
+# Хранилище обработанных заказов (защита от дублей)
+processed_orders = set()
+
 # Создаём приложение
 application = Application.builder().token(TOKEN).build()
+
+# --- Инициализация приложения (синхронно, однократно) ---
+try:
+    asyncio.run(application.initialize())
+except RuntimeError:
+    pass  # если уже инициализировано
 
 # --- Обработчики команд ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -101,6 +110,16 @@ application.add_handler(CommandHandler("both", order_both))
 application.add_handler(CommandHandler("cancel", cancel))
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_address))
 
+# --- Вспомогательная функция для синхронной отправки сообщений ---
+def send_telegram_message(text):
+    """Отправляет сообщение в Telegram через бота (синхронно)"""
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        loop.run_until_complete(application.bot.send_message(chat_id=ADMIN_CHAT_ID, text=text))
+    finally:
+        loop.close()
+
 # --- Flask приложение ---
 flask_app = Flask(__name__)
 
@@ -108,9 +127,17 @@ flask_app = Flask(__name__)
 def webhook():
     """Принимает данные из формы Tilda"""
     try:
-        # Данные приходят как form-data
         data = request.form.to_dict()
         logging.info(f"Получены данные из Tilda: {data}")
+
+        # Защита от дублей: проверяем orderid
+        order_id = data.get('payment[orderid]')
+        if order_id:
+            if order_id in processed_orders:
+                logging.info(f"Дубликат заказа {order_id} — игнорируем")
+                return jsonify({"status": "duplicate ignored"}), 200
+            else:
+                processed_orders.add(order_id)
 
         # Извлекаем данные клиента
         client_name = data.get('name', 'Не указано')
@@ -190,30 +217,18 @@ def webhook():
         message += f"Итого: {total_price} руб.\n"
         message += f"Тип заказа: {order_type}"
 
-        # Отправляем менеджеру (используем asyncio.run, так как мы в синхронной функции)
-        asyncio.run(application.bot.send_message(chat_id=ADMIN_CHAT_ID, text=message))
+        # Отправляем менеджеру через синхронную обёртку
+        send_telegram_message(message)
 
-        # Дополнительные действия в зависимости от типа
+        # Дополнительные инструкции
         if order_type == 'electronic':
-            asyncio.run(application.bot.send_message(
-                chat_id=ADMIN_CHAT_ID,
-                text="📌 **Электронная книга.** Отправьте файл на email клиента."
-            ))
+            send_telegram_message("📌 **Электронная книга.** Отправьте файл на email клиента.")
         elif order_type == 'printed':
-            asyncio.run(application.bot.send_message(
-                chat_id=ADMIN_CHAT_ID,
-                text="📌 **Печатная книга.** Свяжитесь с клиентом для уточнения адреса ПВЗ."
-            ))
+            send_telegram_message("📌 **Печатная книга.** Свяжитесь с клиентом для уточнения адреса ПВЗ.")
         elif order_type == 'both':
-            asyncio.run(application.bot.send_message(
-                chat_id=ADMIN_CHAT_ID,
-                text="📌 **Электронная + печатная.** Отправьте файл на email и свяжитесь для уточнения адреса."
-            ))
+            send_telegram_message("📌 **Электронная + печатная.** Отправьте файл на email и свяжитесь для уточнения адреса.")
         else:
-            asyncio.run(application.bot.send_message(
-                chat_id=ADMIN_CHAT_ID,
-                text="⚠️ Не удалось определить тип заказа. Проверьте вручную."
-            ))
+            send_telegram_message("⚠️ Не удалось определить тип заказа. Проверьте вручную.")
 
         return jsonify({"status": "ok"}), 200
 
@@ -223,23 +238,17 @@ def webhook():
 
 @flask_app.route('/telegram-webhook', methods=['POST'])
 def telegram_webhook():
-    """
-    Принимает обновления от Telegram.
-    Инициализируем приложение и обрабатываем каждое обновление в отдельном цикле.
-    """
+    """Принимает обновления от Telegram"""
     try:
         json_data = request.get_json(force=True)
         update = Update.de_json(json_data, application.bot)
-
-        # Инициализируем приложение (если ещё не инициализировано)
-        # и обрабатываем обновление в одном событийном цикле
-        async def process_update():
-            await application.initialize()
-            await application.process_update(update)
-            await application.shutdown()
-
-        asyncio.run(process_update())
-
+        # Обрабатываем обновление в новом цикле
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(application.process_update(update))
+        finally:
+            loop.close()
         return jsonify({"status": "ok"}), 200
     except Exception as e:
         logging.error(f"Ошибка в вебхуке Telegram: {e}")
@@ -250,16 +259,19 @@ def set_webhook():
     """Устанавливает вебхук для бота"""
     webhook_url = f"https://future-mission-book-bot.onrender.com/telegram-webhook"
     try:
-        async def set_webhook_async():
-            await application.initialize()
-            await application.bot.set_webhook(url=webhook_url)
-            await application.shutdown()
-
-        asyncio.run(set_webhook_async())
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(application.bot.set_webhook(url=webhook_url))
+        finally:
+            loop.close()
         return jsonify({"status": "webhook set successfully"}), 200
     except Exception as e:
-        logging.error(f"Ошибка установки вебхука: {e}")
         return jsonify({"error": str(e)}), 500
+
+@flask_app.route('/')
+def index():
+    return "✅ Бот Future Mission Book Bot работает!", 200
 
 if __name__ == "__main__":
     flask_app.run(host='0.0.0.0', port=10000)
