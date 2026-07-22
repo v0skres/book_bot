@@ -18,7 +18,7 @@ logging.basicConfig(level=logging.INFO)
 processed_orders = set()
 
 # Создаём отдельный экземпляр Bot для отправки сообщений из вебхука
-bot_for_webhook = Bot(token=TOKEN)
+bot = Bot(token=TOKEN)
 
 # --- Функция для синхронной отправки сообщений ---
 def send_telegram_message(text):
