@@ -111,47 +111,46 @@ def webhook():
         data = request.form.to_dict()
         logging.info(f"Получены данные из Tilda: {data}")
 
-        # Защита от дублей
-        order_id = data.get('payment[orderid]')
+        # Приводим ключи к нижнему регистру
+        data_lower = {k.lower(): v for k, v in data.items()}
+
+        order_id = data_lower.get('payment[orderid]')
         if order_id:
             if order_id in processed_orders:
                 logging.info(f"Дубликат заказа {order_id} — игнорируем")
                 return jsonify({"status": "duplicate ignored"}), 200
             processed_orders.add(order_id)
 
-        # Извлекаем данные
-        client_name = data.get('name', 'Не указано')
-        client_phone = data.get('Phone', 'Не указано')
-        client_email = data.get('Email', 'Не указано')
-        client_city = data.get('city', 'Не указано')
+        client_name = data_lower.get('name', 'Не указано')
+        client_phone = data_lower.get('phone', 'Не указано')
+        client_email = data_lower.get('email', 'Не указано')
+        client_city = data_lower.get('city', 'Не указано')
 
-        # Извлекаем товары
         products = []
         i = 0
         while True:
             name_key = f'payment[products][{i}][name]'
-            if name_key not in data:
+            if name_key not in data_lower:
                 break
             product = {
-                'name': data.get(name_key, ''),
-                'quantity': data.get(f'payment[products][{i}][quantity]', '1'),
-                'amount': data.get(f'payment[products][{i}][amount]', '0'),
-                'price': data.get(f'payment[products][{i}][price]', '0'),
+                'name': data_lower.get(name_key, ''),
+                'quantity': data_lower.get(f'payment[products][{i}][quantity]', '1'),
+                'amount': data_lower.get(f'payment[products][{i}][amount]', '0'),
+                'price': data_lower.get(f'payment[products][{i}][price]', '0'),
             }
             products.append(product)
             i += 1
 
         if not products:
-            product_name = data.get('product_name') or data.get('product') or data.get('payment[product][name]')
+            product_name = data_lower.get('product_name') or data_lower.get('product') or data_lower.get('payment[product][name]')
             if product_name:
                 products.append({
                     'name': product_name,
-                    'quantity': data.get('quantity', '1'),
-                    'amount': data.get('amount') or data.get('payment[amount]', '0'),
-                    'price': data.get('price') or data.get('payment[amount]', '0'),
+                    'quantity': data_lower.get('quantity', '1'),
+                    'amount': data_lower.get('amount') or data_lower.get('payment[amount]', '0'),
+                    'price': data_lower.get('price') or data_lower.get('payment[amount]', '0'),
                 })
 
-        # Определяем тип заказа
         order_types = set()
         total_price = 0
         for p in products:
@@ -173,7 +172,10 @@ def webhook():
         else:
             order_type = 'unknown'
 
-        message = (
+        # Формируем все сообщения для отправки
+        messages = []
+
+        main_message = (
             f"📦 **Новый заказ книги!**\n"
             f"Клиент: {client_name}\n"
             f"Телефон: {client_phone}\n"
@@ -182,20 +184,32 @@ def webhook():
             f"Товары:\n"
         )
         for p in products:
-            message += f"  - {p['name']} x{p['quantity']} = {p['amount']} руб.\n"
-        message += f"Итого: {total_price} руб.\n"
-        message += f"Тип заказа: {order_type}"
-
-        send_telegram_message(message)
+            main_message += f"  - {p['name']} x{p['quantity']} = {p['amount']} руб.\n"
+        main_message += f"Итого: {total_price} руб.\n"
+        main_message += f"Тип заказа: {order_type}"
+        messages.append(main_message)
 
         if order_type == 'electronic':
-            send_telegram_message("📌 **Электронная книга.** Отправьте файл на email клиента.")
+            messages.append("📌 **Электронная книга.** Отправьте файл на email клиента.")
         elif order_type == 'printed':
-            send_telegram_message("📌 **Печатная книга.** Свяжитесь с клиентом для уточнения адреса ПВЗ.")
+            messages.append("📌 **Печатная книга.** Свяжитесь с клиентом для уточнения адреса ПВЗ.")
         elif order_type == 'both':
-            send_telegram_message("📌 **Электронная + печатная.** Отправьте файл на email и свяжитесь для уточнения адреса.")
+            messages.append("📌 **Электронная + печатная.** Отправьте файл на email и свяжитесь для уточнения адреса.")
         else:
-            send_telegram_message("⚠️ Не удалось определить тип заказа. Проверьте вручную.")
+            messages.append("⚠️ Не удалось определить тип заказа. Проверьте вручную.")
+
+        # Отправляем все сообщения одной асинхронной функцией
+        async def send_all_messages():
+            for msg in messages:
+                await bot.send_message(chat_id=ADMIN_CHAT_ID, text=msg)
+
+        # Запускаем отправку в отдельном цикле
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(send_all_messages())
+        finally:
+            loop.close()
 
         return jsonify({"status": "ok"}), 200
 
