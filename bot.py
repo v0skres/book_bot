@@ -1,9 +1,10 @@
 import logging
 import os
 import asyncio
+import threading
 from flask import Flask, request, jsonify
-from telegram import Update, Bot
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram import Bot
+from telegram.ext import Application, CommandHandler, MessageHandler, filters
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -13,27 +14,22 @@ ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID"))
 
 logging.basicConfig(level=logging.INFO)
 
-waiting_for_address = {}
+# Хранилище обработанных заказов (защита от дублей)
 processed_orders = set()
 
-# Создаём отдельный экземпляр Bot для отправки сообщений
-bot = Bot(token=TOKEN)
+# Создаём отдельный экземпляр Bot для отправки сообщений из вебхука
+bot_for_webhook = Bot(token=TOKEN)
 
-# Создаём Application для обработки команд (свой собственный цикл)
-application = Application.builder().token(TOKEN).build()
-
-# Инициализация Application
-def init_app():
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
+# --- Функция для синхронной отправки сообщений ---
+def send_telegram_message(text):
+    """Отправляет сообщение через отдельный экземпляр Bot синхронно"""
     try:
-        loop.run_until_complete(application.initialize())
-    finally:
-        loop.close()
-init_app()
+        asyncio.run(bot_for_webhook.send_message(chat_id=ADMIN_CHAT_ID, text=text))
+    except Exception as e:
+        logging.error(f"Ошибка отправки сообщения: {e}")
 
-# --- Обработчики команд ---
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# --- Обработчики команд для бота (polling) ---
+async def start(update, context):
     await update.message.reply_text(
         "👋 Привет! Я бот для выдачи книги «О чём зудят твои таланты?».\n\n"
         "Доступные команды:\n"
@@ -43,35 +39,35 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/cancel — отменить запрос адреса"
     )
 
-async def order_electronic(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def order_electronic(update, context):
     user_id = update.effective_user.id
     await send_electronic_book(update, context, user_id)
 
-async def order_printed(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def order_printed(update, context):
     user_id = update.effective_user.id
-    waiting_for_address[user_id] = True
+    context.user_data['waiting_for_address'] = True
     await context.bot.send_message(
         chat_id=user_id,
         text="📦 Для отправки печатной версии книги, пожалуйста, напишите адрес ближайшего пункта выдачи заказов (ПВЗ).\n\n"
              "Чтобы отменить, отправьте /cancel"
     )
 
-async def order_both(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def order_both(update, context):
     user_id = update.effective_user.id
     await send_electronic_book(update, context, user_id)
-    waiting_for_address[user_id] = True
+    context.user_data['waiting_for_address'] = True
     await context.bot.send_message(
         chat_id=user_id,
         text="📦 Теперь для печатной версии книги, пожалуйста, напишите адрес ближайшего пункта выдачи заказов (ПВЗ).\n\n"
              "Чтобы отменить, отправьте /cancel"
     )
 
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def cancel(update, context):
     user_id = update.effective_user.id
-    waiting_for_address[user_id] = False
+    context.user_data['waiting_for_address'] = False
     await update.message.reply_text("❌ Операция отменена.")
 
-async def send_electronic_book(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: int):
+async def send_electronic_book(update, context, user_id):
     try:
         with open("book.txt", 'rb') as f:
             await context.bot.send_document(
@@ -86,33 +82,27 @@ async def send_electronic_book(update: Update, context: ContextTypes.DEFAULT_TYP
             text="⚠️ К сожалению, файл книги временно недоступен. Мы уже работаем над этим!"
         )
 
-async def handle_address(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_address(update, context):
     user_id = update.effective_user.id
     address = update.message.text
-    if waiting_for_address.get(user_id, False):
+    if context.user_data.get('waiting_for_address', False):
         logging.info(f"Адрес получен от {user_id}: {address}")
         send_telegram_message(
             f"📍 Новый заказ печатной книги!\nПользователь: {user_id}\nАдрес ПВЗ: {address}"
         )
         await update.message.reply_text("✅ Спасибо! Ваш адрес передан. В ближайшее время с вами свяжутся для подтверждения заказа.")
-        waiting_for_address[user_id] = False
+        context.user_data['waiting_for_address'] = False
 
-# --- Регистрация обработчиков ---
-application.add_handler(CommandHandler("start", start))
-application.add_handler(CommandHandler("electronic", order_electronic))
-application.add_handler(CommandHandler("printed", order_printed))
-application.add_handler(CommandHandler("both", order_both))
-application.add_handler(CommandHandler("cancel", cancel))
-application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_address))
+# --- Создаём приложение для бота (polling) ---
+app_bot = Application.builder().token(TOKEN).build()
+app_bot.add_handler(CommandHandler("start", start))
+app_bot.add_handler(CommandHandler("electronic", order_electronic))
+app_bot.add_handler(CommandHandler("printed", order_printed))
+app_bot.add_handler(CommandHandler("both", order_both))
+app_bot.add_handler(CommandHandler("cancel", cancel))
+app_bot.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_address))
 
-# --- Функция для синхронной отправки сообщений (использует отдельный bot) ---
-def send_telegram_message(text):
-    """Отправляет сообщение в Telegram (синхронно)"""
-    async def send():
-        await bot.send_message(chat_id=ADMIN_CHAT_ID, text=text)
-    asyncio.run(send())
-
-# --- Flask приложение ---
+# --- Flask приложение для вебхуков от Tilda ---
 flask_app = Flask(__name__)
 
 @flask_app.route('/webhook', methods=['POST'])
@@ -121,46 +111,47 @@ def webhook():
         data = request.form.to_dict()
         logging.info(f"Получены данные из Tilda: {data}")
 
-        # Приводим ключи к нижнему регистру для единообразия
-        data_lower = {k.lower(): v for k, v in data.items()}
-
-        order_id = data_lower.get('payment[orderid]')
+        # Защита от дублей
+        order_id = data.get('payment[orderid]')
         if order_id:
             if order_id in processed_orders:
                 logging.info(f"Дубликат заказа {order_id} — игнорируем")
                 return jsonify({"status": "duplicate ignored"}), 200
             processed_orders.add(order_id)
 
-        client_name = data_lower.get('name', 'Не указано')
-        client_phone = data_lower.get('phone', 'Не указано')
-        client_email = data_lower.get('email', 'Не указано')
-        client_city = data_lower.get('city', 'Не указано')
+        # Извлекаем данные
+        client_name = data.get('name', 'Не указано')
+        client_phone = data.get('Phone', 'Не указано')
+        client_email = data.get('Email', 'Не указано')
+        client_city = data.get('city', 'Не указано')
 
+        # Извлекаем товары
         products = []
         i = 0
         while True:
             name_key = f'payment[products][{i}][name]'
-            if name_key not in data_lower:
+            if name_key not in data:
                 break
             product = {
-                'name': data_lower.get(name_key, ''),
-                'quantity': data_lower.get(f'payment[products][{i}][quantity]', '1'),
-                'amount': data_lower.get(f'payment[products][{i}][amount]', '0'),
-                'price': data_lower.get(f'payment[products][{i}][price]', '0'),
+                'name': data.get(name_key, ''),
+                'quantity': data.get(f'payment[products][{i}][quantity]', '1'),
+                'amount': data.get(f'payment[products][{i}][amount]', '0'),
+                'price': data.get(f'payment[products][{i}][price]', '0'),
             }
             products.append(product)
             i += 1
 
         if not products:
-            product_name = data_lower.get('product_name') or data_lower.get('product') or data_lower.get('payment[product][name]')
+            product_name = data.get('product_name') or data.get('product') or data.get('payment[product][name]')
             if product_name:
                 products.append({
                     'name': product_name,
-                    'quantity': data_lower.get('quantity', '1'),
-                    'amount': data_lower.get('amount') or data_lower.get('payment[amount]', '0'),
-                    'price': data_lower.get('price') or data_lower.get('payment[amount]', '0'),
+                    'quantity': data.get('quantity', '1'),
+                    'amount': data.get('amount') or data.get('payment[amount]', '0'),
+                    'price': data.get('price') or data.get('payment[amount]', '0'),
                 })
 
+        # Определяем тип заказа
         order_types = set()
         total_price = 0
         for p in products:
@@ -212,39 +203,26 @@ def webhook():
         logging.error(f"Ошибка в вебхуке: {e}")
         return jsonify({"status": "error", "message": str(e)}), 500
 
-@flask_app.route('/telegram-webhook', methods=['POST'])
-def telegram_webhook():
-    try:
-        json_data = request.get_json(force=True)
-        update = Update.de_json(json_data, application.bot)
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            loop.run_until_complete(application.process_update(update))
-        finally:
-            loop.close()
-        return jsonify({"status": "ok"}), 200
-    except Exception as e:
-        logging.error(f"Ошибка в вебхуке Telegram: {e}")
-        return jsonify({"status": "error"}), 500
-
-@flask_app.route('/set-webhook', methods=['GET'])
-def set_webhook():
-    webhook_url = f"https://future-mission-book-bot.onrender.com/telegram-webhook"
-    try:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            loop.run_until_complete(application.bot.set_webhook(url=webhook_url))
-        finally:
-            loop.close()
-        return jsonify({"status": "webhook set successfully"}), 200
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
 @flask_app.route('/')
 def index():
     return "✅ Бот Future Mission Book Bot работает!", 200
 
-if __name__ == "__main__":
+# --- Запуск бота (polling) и Flask-сервера в разных потоках ---
+def run_bot():
+    """Запускает бота в режиме polling"""
+    logging.info("Запуск бота (polling)...")
+    app_bot.run_polling()
+
+def run_flask():
+    """Запускает Flask-сервер для вебхуков Tilda"""
+    logging.info("Запуск Flask-сервера...")
     flask_app.run(host='0.0.0.0', port=10000)
+
+if __name__ == "__main__":
+    # Запускаем бота и Flask в разных потоках
+    bot_thread = threading.Thread(target=run_bot)
+    flask_thread = threading.Thread(target=run_flask)
+    bot_thread.start()
+    flask_thread.start()
+    bot_thread.join()
+    flask_thread.join()
