@@ -22,9 +22,9 @@ bot_for_webhook = Bot(token=TOKEN)
 
 # --- Функция для синхронной отправки сообщений ---
 def send_telegram_message(text):
-    """Отправляет сообщение через отдельный экземпляр Bot синхронно"""
+    """Отправляет сообщение в Telegram (синхронно)"""
     try:
-        asyncio.run(bot_for_webhook.send_message(chat_id=ADMIN_CHAT_ID, text=text))
+        asyncio.run(bot.send_message(chat_id=ADMIN_CHAT_ID, text=text))
     except Exception as e:
         logging.error(f"Ошибка отправки сообщения: {e}")
 
