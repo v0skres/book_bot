@@ -25,7 +25,7 @@ SMTP_PASSWORD = os.getenv("SMTP_PASSWORD")
 SMTP_FROM = os.getenv("SMTP_FROM")
 
 # Путь к файлу книги (можно использовать book.pdf, но пока оставим book.txt)
-BOOK_FILE_PATH = os.getenv("BOOK_FILE_PATH", "book.pdf")
+BOOK_FILE_PATH = os.getenv("BOOK_FILE_PATH", "book.txt")
 
 logging.basicConfig(level=logging.INFO)
 
