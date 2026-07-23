@@ -312,9 +312,10 @@ def run_flask():
     flask_app.run(host='0.0.0.0', port=10000)
 
 if __name__ == "__main__":
-    bot_thread = threading.Thread(target=run_bot)
-    flask_thread = threading.Thread(target=run_flask)
-    bot_thread.start()
+    # Запускаем Flask в отдельном потоке (daemon=True, чтобы завершался вместе с основным)
+    flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
-    bot_thread.join()
-    flask_thread.join()
+    
+    # Бота запускаем в главном потоке, чтобы он корректно обрабатывал сигналы
+    logging.info("Запуск бота (polling) в главном потоке...")
+    app_bot.run_polling()
