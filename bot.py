@@ -19,7 +19,7 @@ ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID"))
 
 # SMTP настройки
 SMTP_HOST = os.getenv("SMTP_HOST")
-SMTP_PORT = int(os.getenv("SMTP_PORT", 465))
+SMTP_PORT = int(os.getenv("SMTP_PORT", 587))
 SMTP_USER = os.getenv("SMTP_USER")
 SMTP_PASSWORD = os.getenv("SMTP_PASSWORD")
 SMTP_FROM = os.getenv("SMTP_FROM")
@@ -37,13 +37,11 @@ bot = Bot(token=TOKEN)
 
 # --- Функция отправки email с вложением ---
 def send_email_with_attachment(to_email, subject, body, attachment_path=None):
-    """Отправляет письмо с вложением (файл книги) на указанный email."""
     try:
         msg = MIMEMultipart()
         msg['From'] = SMTP_FROM
         msg['To'] = to_email
         msg['Subject'] = subject
-
         msg.attach(MIMEText(body, 'plain'))
 
         if attachment_path and os.path.exists(attachment_path):
@@ -51,16 +49,14 @@ def send_email_with_attachment(to_email, subject, body, attachment_path=None):
                 part = MIMEBase('application', 'octet-stream')
                 part.set_payload(f.read())
                 encoders.encode_base64(part)
-                part.add_header(
-                    'Content-Disposition',
-                    f'attachment; filename="{os.path.basename(attachment_path)}"'
-                )
+                part.add_header('Content-Disposition', f'attachment; filename="{os.path.basename(attachment_path)}"')
                 msg.attach(part)
         else:
             logging.warning(f"Файл вложения не найден: {attachment_path}")
 
-        # Подключаемся к SMTP-серверу и отправляем
-        with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT) as server:
+        # Используем STARTTLS (порт 587)
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
+            server.starttls()
             server.login(SMTP_USER, SMTP_PASSWORD)
             server.sendmail(SMTP_FROM, to_email, msg.as_string())
         logging.info(f"Письмо отправлено на {to_email}")
