@@ -2,6 +2,11 @@ import logging
 import os
 import asyncio
 import threading
+import smtplib
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from email.mime.base import MIMEBase
+from email import encoders
 from flask import Flask, request, jsonify
 from telegram import Bot
 from telegram.ext import Application, CommandHandler, MessageHandler, filters
@@ -12,6 +17,16 @@ load_dotenv()
 TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID"))
 
+# SMTP настройки
+SMTP_HOST = os.getenv("SMTP_HOST")
+SMTP_PORT = int(os.getenv("SMTP_PORT", 465))
+SMTP_USER = os.getenv("SMTP_USER")
+SMTP_PASSWORD = os.getenv("SMTP_PASSWORD")
+SMTP_FROM = os.getenv("SMTP_FROM")
+
+# Путь к файлу книги (можно использовать book.pdf, но пока оставим book.txt)
+BOOK_FILE_PATH = os.getenv("BOOK_FILE_PATH", "book.pdf")
+
 logging.basicConfig(level=logging.INFO)
 
 # Хранилище обработанных заказов (защита от дублей)
@@ -20,7 +35,42 @@ processed_orders = set()
 # Создаём отдельный экземпляр Bot для отправки сообщений из вебхука
 bot = Bot(token=TOKEN)
 
+# --- Функция отправки email с вложением ---
+def send_email_with_attachment(to_email, subject, body, attachment_path=None):
+    """Отправляет письмо с вложением (файл книги) на указанный email."""
+    try:
+        msg = MIMEMultipart()
+        msg['From'] = SMTP_FROM
+        msg['To'] = to_email
+        msg['Subject'] = subject
+
+        msg.attach(MIMEText(body, 'plain'))
+
+        if attachment_path and os.path.exists(attachment_path):
+            with open(attachment_path, 'rb') as f:
+                part = MIMEBase('application', 'octet-stream')
+                part.set_payload(f.read())
+                encoders.encode_base64(part)
+                part.add_header(
+                    'Content-Disposition',
+                    f'attachment; filename="{os.path.basename(attachment_path)}"'
+                )
+                msg.attach(part)
+        else:
+            logging.warning(f"Файл вложения не найден: {attachment_path}")
+
+        # Подключаемся к SMTP-серверу и отправляем
+        with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT) as server:
+            server.login(SMTP_USER, SMTP_PASSWORD)
+            server.sendmail(SMTP_FROM, to_email, msg.as_string())
+        logging.info(f"Письмо отправлено на {to_email}")
+        return True
+    except Exception as e:
+        logging.error(f"Ошибка отправки email: {e}")
+        return False
+
 # --- Обработчики команд для бота (polling) ---
+# (оставляем без изменений)
 async def start(update, context):
     await update.message.reply_text(
         "👋 Привет! Я бот для выдачи книги «О чём зудят твои таланты?».\n\n"
@@ -61,7 +111,7 @@ async def cancel(update, context):
 
 async def send_electronic_book(update, context, user_id):
     try:
-        with open("book.txt", 'rb') as f:
+        with open(BOOK_FILE_PATH, 'rb') as f:
             await context.bot.send_document(
                 chat_id=user_id,
                 document=f,
@@ -96,6 +146,17 @@ app_bot.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_addre
 
 # --- Flask приложение для вебхуков от Tilda ---
 flask_app = Flask(__name__)
+
+def send_telegram_message(text):
+    """Отправляет сообщение менеджеру (синхронная обёртка)."""
+    async def send():
+        await bot.send_message(chat_id=ADMIN_CHAT_ID, text=text)
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        loop.run_until_complete(send())
+    finally:
+        loop.close()
 
 @flask_app.route('/webhook', methods=['POST'])
 def webhook():
@@ -164,7 +225,29 @@ def webhook():
         else:
             order_type = 'unknown'
 
-        # Формируем все сообщения для отправки
+        # --- ОБРАБОТКА ЭЛЕКТРОННОЙ КНИГИ (отправка на email) ---
+        email_sent = False
+        if order_type in ('electronic', 'both'):
+            if client_email and client_email != 'Не указано':
+                subject = "Ваша электронная книга «О чём зудят твои таланты?»"
+                body = (
+                    f"Здравствуйте, {client_name}!\n\n"
+                    "Благодарим за покупку электронной книги «О чём зудят твои таланты?».\n"
+                    "Файл книги прикреплён к этому письму.\n\n"
+                    "Приятного чтения!\n\n"
+                    "С уважением,\n"
+                    "Команда Future Mission"
+                )
+                email_sent = send_email_with_attachment(
+                    to_email=client_email,
+                    subject=subject,
+                    body=body,
+                    attachment_path=BOOK_FILE_PATH
+                )
+            else:
+                logging.warning("Email клиента не указан, отправка книги невозможна.")
+
+        # --- УВЕДОМЛЕНИЕ МЕНЕДЖЕРА ---
         messages = []
 
         main_message = (
@@ -182,11 +265,18 @@ def webhook():
         messages.append(main_message)
 
         if order_type == 'electronic':
-            messages.append("📌 **Электронная книга.** Отправьте файл на email клиента.")
+            if email_sent:
+                messages.append("📧 **Электронная книга автоматически отправлена на email клиента.**")
+            else:
+                messages.append("⚠️ **Не удалось отправить книгу на email. Отправьте файл вручную.**")
         elif order_type == 'printed':
             messages.append("📌 **Печатная книга.** Свяжитесь с клиентом для уточнения адреса ПВЗ.")
         elif order_type == 'both':
-            messages.append("📌 **Электронная + печатная.** Отправьте файл на email и свяжитесь для уточнения адреса.")
+            if email_sent:
+                messages.append("📧 **Электронная книга автоматически отправлена на email клиента.**")
+            else:
+                messages.append("⚠️ **Не удалось отправить книгу на email. Отправьте файл вручную.**")
+            messages.append("📌 **Печатная книга.** Свяжитесь с клиентом для уточнения адреса ПВЗ.")
         else:
             messages.append("⚠️ Не удалось определить тип заказа. Проверьте вручную.")
 
@@ -195,7 +285,6 @@ def webhook():
             for msg in messages:
                 await bot.send_message(chat_id=ADMIN_CHAT_ID, text=msg)
 
-        # Запускаем отправку в отдельном цикле
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         try:
@@ -215,17 +304,14 @@ def index():
 
 # --- Запуск бота (polling) и Flask-сервера в разных потоках ---
 def run_bot():
-    """Запускает бота в режиме polling"""
     logging.info("Запуск бота (polling)...")
     app_bot.run_polling()
 
 def run_flask():
-    """Запускает Flask-сервер для вебхуков Tilda"""
     logging.info("Запуск Flask-сервера...")
     flask_app.run(host='0.0.0.0', port=10000)
 
 if __name__ == "__main__":
-    # Запускаем бота и Flask в разных потоках
     bot_thread = threading.Thread(target=run_bot)
     flask_thread = threading.Thread(target=run_flask)
     bot_thread.start()
