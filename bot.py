@@ -2,71 +2,92 @@ import logging
 import os
 import asyncio
 import threading
-import smtplib
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
-from email.mime.base import MIMEBase
-from email import encoders
+import base64
 from flask import Flask, request, jsonify
 from telegram import Bot
 from telegram.ext import Application, CommandHandler, MessageHandler, filters
 from dotenv import load_dotenv
+import requests
 
 load_dotenv()
 
 TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID"))
 
-# SMTP настройки
-SMTP_HOST = os.getenv("SMTP_HOST")
-SMTP_PORT = int(os.getenv("SMTP_PORT", 587))
-SMTP_USER = os.getenv("SMTP_USER")
-SMTP_PASSWORD = os.getenv("SMTP_PASSWORD")
-SMTP_FROM = os.getenv("SMTP_FROM")
+# SendGrid настройки
+SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY")
+SENDGRID_FROM_EMAIL = os.getenv("SENDGRID_FROM_EMAIL")
 
-# Путь к файлу книги (можно использовать book.pdf, но пока оставим book.txt)
 BOOK_FILE_PATH = os.getenv("BOOK_FILE_PATH", "book.txt")
 
 logging.basicConfig(level=logging.INFO)
 
-# Хранилище обработанных заказов (защита от дублей)
 processed_orders = set()
-
-# Создаём отдельный экземпляр Bot для отправки сообщений из вебхука
 bot = Bot(token=TOKEN)
 
-# --- Функция отправки email с вложением ---
+# --- Функция отправки email через SendGrid ---
 def send_email_with_attachment(to_email, subject, body, attachment_path=None):
-    try:
-        msg = MIMEMultipart()
-        msg['From'] = SMTP_FROM
-        msg['To'] = to_email
-        msg['Subject'] = subject
-        msg.attach(MIMEText(body, 'plain'))
+    if not SENDGRID_API_KEY or not SENDGRID_FROM_EMAIL:
+        logging.error("SendGrid не настроен: отсутствуют API_KEY или FROM_EMAIL")
+        return False
 
+    try:
+        headers = {
+            "Authorization": f"Bearer {SENDGRID_API_KEY}",
+            "Content-Type": "application/json"
+        }
+
+        data = {
+            "personalizations": [
+                {
+                    "to": [{"email": to_email}],
+                    "subject": subject
+                }
+            ],
+            "from": {"email": SENDGRID_FROM_EMAIL},
+            "content": [
+                {
+                    "type": "text/plain",
+                    "value": body
+                }
+            ]
+        }
+
+        # Добавляем вложение, если файл существует
         if attachment_path and os.path.exists(attachment_path):
-            with open(attachment_path, 'rb') as f:
-                part = MIMEBase('application', 'octet-stream')
-                part.set_payload(f.read())
-                encoders.encode_base64(part)
-                part.add_header('Content-Disposition', f'attachment; filename="{os.path.basename(attachment_path)}"')
-                msg.attach(part)
+            with open(attachment_path, "rb") as f:
+                file_data = f.read()
+                encoded = base64.b64encode(file_data).decode()
+                filename = os.path.basename(attachment_path)
+                data["attachments"] = [
+                    {
+                        "content": encoded,
+                        "filename": filename,
+                        "type": "application/pdf",
+                        "disposition": "attachment"
+                    }
+                ]
         else:
             logging.warning(f"Файл вложения не найден: {attachment_path}")
 
-        # Используем STARTTLS (порт 587)
-        with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
-            server.starttls()
-            server.login(SMTP_USER, SMTP_PASSWORD)
-            server.sendmail(SMTP_FROM, to_email, msg.as_string())
-        logging.info(f"Письмо отправлено на {to_email}")
-        return True
+        response = requests.post(
+            "https://api.sendgrid.com/v3/mail/send",
+            headers=headers,
+            json=data
+        )
+
+        if response.status_code == 202:
+            logging.info(f"Письмо отправлено на {to_email} через SendGrid")
+            return True
+        else:
+            logging.error(f"Ошибка SendGrid: {response.status_code} - {response.text}")
+            return False
+
     except Exception as e:
-        logging.error(f"Ошибка отправки email: {e}")
+        logging.error(f"Ошибка отправки email через SendGrid: {e}")
         return False
 
-# --- Обработчики команд для бота (polling) ---
-# (оставляем без изменений)
+# --- Обработчики команд бота ---
 async def start(update, context):
     await update.message.reply_text(
         "👋 Привет! Я бот для выдачи книги «О чём зудят твои таланты?».\n\n"
@@ -79,33 +100,6 @@ async def start(update, context):
 
 async def order_electronic(update, context):
     user_id = update.effective_user.id
-    await send_electronic_book(update, context, user_id)
-
-async def order_printed(update, context):
-    user_id = update.effective_user.id
-    context.user_data['waiting_for_address'] = True
-    await context.bot.send_message(
-        chat_id=user_id,
-        text="📦 Для отправки печатной версии книги, пожалуйста, напишите адрес ближайшего пункта выдачи заказов (ПВЗ).\n\n"
-             "Чтобы отменить, отправьте /cancel"
-    )
-
-async def order_both(update, context):
-    user_id = update.effective_user.id
-    await send_electronic_book(update, context, user_id)
-    context.user_data['waiting_for_address'] = True
-    await context.bot.send_message(
-        chat_id=user_id,
-        text="📦 Теперь для печатной версии книги, пожалуйста, напишите адрес ближайшего пункта выдачи заказов (ПВЗ).\n\n"
-             "Чтобы отменить, отправьте /cancel"
-    )
-
-async def cancel(update, context):
-    user_id = update.effective_user.id
-    context.user_data['waiting_for_address'] = False
-    await update.message.reply_text("❌ Операция отменена.")
-
-async def send_electronic_book(update, context, user_id):
     try:
         with open(BOOK_FILE_PATH, 'rb') as f:
             await context.bot.send_document(
@@ -117,21 +111,55 @@ async def send_electronic_book(update, context, user_id):
     except FileNotFoundError:
         await context.bot.send_message(
             chat_id=user_id,
-            text="⚠️ К сожалению, файл книги временно недоступен. Мы уже работаем над этим!"
+            text="⚠️ К сожалению, файл книги временно недоступен."
         )
+
+async def order_printed(update, context):
+    user_id = update.effective_user.id
+    context.user_data['waiting_for_address'] = True
+    await context.bot.send_message(
+        chat_id=user_id,
+        text="📦 Для отправки печатной версии книги, пожалуйста, напишите адрес ближайшего пункта выдачи заказов (ПВЗ)."
+    )
+
+async def order_both(update, context):
+    user_id = update.effective_user.id
+    try:
+        with open(BOOK_FILE_PATH, 'rb') as f:
+            await context.bot.send_document(
+                chat_id=user_id,
+                document=f,
+                caption="📖 Вот ваша электронная книга."
+            )
+        logging.info(f"Книга отправлена пользователю {user_id}")
+    except FileNotFoundError:
+        await context.bot.send_message(chat_id=user_id, text="⚠️ Файл книги временно недоступен.")
+    context.user_data['waiting_for_address'] = True
+    await context.bot.send_message(
+        chat_id=user_id,
+        text="📦 Теперь для печатной версии книги, пожалуйста, напишите адрес ближайшего ПВЗ."
+    )
+
+async def cancel(update, context):
+    user_id = update.effective_user.id
+    context.user_data['waiting_for_address'] = False
+    await update.message.reply_text("❌ Операция отменена.")
 
 async def handle_address(update, context):
     user_id = update.effective_user.id
     address = update.message.text
     if context.user_data.get('waiting_for_address', False):
         logging.info(f"Адрес получен от {user_id}: {address}")
-        send_telegram_message(
-            f"📍 Новый заказ печатной книги!\nПользователь: {user_id}\nАдрес ПВЗ: {address}"
-        )
-        await update.message.reply_text("✅ Спасибо! Ваш адрес передан. В ближайшее время с вами свяжутся для подтверждения заказа.")
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(bot.send_message(chat_id=ADMIN_CHAT_ID, text=f"📍 Печатная книга для {user_id}, адрес: {address}"))
+        finally:
+            loop.close()
+        await update.message.reply_text("✅ Спасибо! Ваш адрес передан.")
         context.user_data['waiting_for_address'] = False
 
-# --- Создаём приложение для бота (polling) ---
+# --- Создаём приложение ---
 app_bot = Application.builder().token(TOKEN).build()
 app_bot.add_handler(CommandHandler("start", start))
 app_bot.add_handler(CommandHandler("electronic", order_electronic))
@@ -140,19 +168,8 @@ app_bot.add_handler(CommandHandler("both", order_both))
 app_bot.add_handler(CommandHandler("cancel", cancel))
 app_bot.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_address))
 
-# --- Flask приложение для вебхуков от Tilda ---
+# --- Flask ---
 flask_app = Flask(__name__)
-
-def send_telegram_message(text):
-    """Отправляет сообщение менеджеру (синхронная обёртка)."""
-    async def send():
-        await bot.send_message(chat_id=ADMIN_CHAT_ID, text=text)
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    try:
-        loop.run_until_complete(send())
-    finally:
-        loop.close()
 
 @flask_app.route('/webhook', methods=['POST'])
 def webhook():
@@ -160,52 +177,46 @@ def webhook():
         data = request.form.to_dict()
         logging.info(f"Получены данные из Tilda: {data}")
 
-        # Приводим ключи к нижнему регистру
-        data_lower = {k.lower(): v for k, v in data.items()}
-
-        order_id = data_lower.get('payment[orderid]')
+        order_id = data.get('payment[orderid]')
+        if order_id and order_id in processed_orders:
+            logging.info(f"Дубликат заказа {order_id} — игнорируем")
+            return jsonify({"status": "duplicate ignored"}), 200
         if order_id:
-            if order_id in processed_orders:
-                logging.info(f"Дубликат заказа {order_id} — игнорируем")
-                return jsonify({"status": "duplicate ignored"}), 200
             processed_orders.add(order_id)
 
-        client_name = data_lower.get('name', 'Не указано')
-        client_phone = data_lower.get('phone', 'Не указано')
-        client_email = data_lower.get('email', 'Не указано')
-        client_city = data_lower.get('city', 'Не указано')
+        client_name = data.get('name', 'Не указано')
+        client_phone = data.get('Phone', 'Не указано')
+        client_email = data.get('Email', 'Не указано')
+        client_city = data.get('city', 'Не указано')
 
         products = []
         i = 0
         while True:
             name_key = f'payment[products][{i}][name]'
-            if name_key not in data_lower:
+            if name_key not in data:
                 break
-            product = {
-                'name': data_lower.get(name_key, ''),
-                'quantity': data_lower.get(f'payment[products][{i}][quantity]', '1'),
-                'amount': data_lower.get(f'payment[products][{i}][amount]', '0'),
-                'price': data_lower.get(f'payment[products][{i}][price]', '0'),
-            }
-            products.append(product)
+            products.append({
+                'name': data.get(name_key, ''),
+                'quantity': data.get(f'payment[products][{i}][quantity]', '1'),
+                'amount': data.get(f'payment[products][{i}][amount]', '0'),
+                'price': data.get(f'payment[products][{i}][price]', '0'),
+            })
             i += 1
 
         if not products:
-            product_name = data_lower.get('product_name') or data_lower.get('product') or data_lower.get('payment[product][name]')
+            product_name = data.get('product_name') or data.get('product')
             if product_name:
                 products.append({
                     'name': product_name,
-                    'quantity': data_lower.get('quantity', '1'),
-                    'amount': data_lower.get('amount') or data_lower.get('payment[amount]', '0'),
-                    'price': data_lower.get('price') or data_lower.get('payment[amount]', '0'),
+                    'quantity': data.get('quantity', '1'),
+                    'amount': data.get('payment[amount]', '0'),
+                    'price': data.get('payment[amount]', '0'),
                 })
 
         order_types = set()
         total_price = 0
         for p in products:
-            amount_str = p.get('amount', '0')
-            if amount_str and amount_str.isdigit():
-                total_price += int(amount_str)
+            total_price += int(p['amount']) if p['amount'].isdigit() else 0
             name_lower = p['name'].lower()
             if 'электрон' in name_lower:
                 order_types.add('electronic')
@@ -221,10 +232,10 @@ def webhook():
         else:
             order_type = 'unknown'
 
-        # --- ОБРАБОТКА ЭЛЕКТРОННОЙ КНИГИ (отправка на email) ---
+        # --- Отправка email через SendGrid ---
         email_sent = False
         if order_type in ('electronic', 'both'):
-            if client_email and client_email != 'Не указано':
+            if client_email and client_email != 'Не указано' and client_email != '':
                 subject = "Ваша электронная книга «О чём зудят твои таланты?»"
                 body = (
                     f"Здравствуйте, {client_name}!\n\n"
@@ -241,13 +252,12 @@ def webhook():
                     attachment_path=BOOK_FILE_PATH
                 )
             else:
-                logging.warning("Email клиента не указан, отправка книги невозможна.")
+                logging.warning("Email клиента не указан, книга не отправлена")
 
-        # --- УВЕДОМЛЕНИЕ МЕНЕДЖЕРА ---
+        # --- Формируем сообщения для менеджера ---
         messages = []
-
-        main_message = (
-            f"📦 **Новый заказ книги!**\n"
+        main_msg = (
+            f"📦 **Новый заказ!**\n"
             f"Клиент: {client_name}\n"
             f"Телефон: {client_phone}\n"
             f"Email: {client_email}\n"
@@ -255,36 +265,34 @@ def webhook():
             f"Товары:\n"
         )
         for p in products:
-            main_message += f"  - {p['name']} x{p['quantity']} = {p['amount']} руб.\n"
-        main_message += f"Итого: {total_price} руб.\n"
-        main_message += f"Тип заказа: {order_type}"
-        messages.append(main_message)
+            main_msg += f"  - {p['name']} x{p['quantity']} = {p['amount']} руб.\n"
+        main_msg += f"Итого: {total_price} руб.\nТип: {order_type}"
+        messages.append(main_msg)
 
         if order_type == 'electronic':
             if email_sent:
-                messages.append("📧 **Электронная книга автоматически отправлена на email клиента.**")
+                messages.append("✅ Электронная книга автоматически отправлена на email клиента.")
             else:
-                messages.append("⚠️ **Не удалось отправить книгу на email. Отправьте файл вручную.**")
+                messages.append("⚠️ Электронная книга НЕ отправлена. Отправьте вручную.")
         elif order_type == 'printed':
-            messages.append("📌 **Печатная книга.** Свяжитесь с клиентом для уточнения адреса ПВЗ.")
+            messages.append("📌 Печатная книга. Свяжитесь с клиентом для уточнения адреса ПВЗ.")
         elif order_type == 'both':
             if email_sent:
-                messages.append("📧 **Электронная книга автоматически отправлена на email клиента.**")
+                messages.append("✅ Электронная книга автоматически отправлена на email.")
             else:
-                messages.append("⚠️ **Не удалось отправить книгу на email. Отправьте файл вручную.**")
-            messages.append("📌 **Печатная книга.** Свяжитесь с клиентом для уточнения адреса ПВЗ.")
+                messages.append("⚠️ Электронная книга НЕ отправлена. Отправьте вручную.")
+            messages.append("📌 Печатная книга. Свяжитесь с клиентом для уточнения адреса.")
         else:
-            messages.append("⚠️ Не удалось определить тип заказа. Проверьте вручную.")
+            messages.append("⚠️ Тип заказа не определён, проверьте вручную.")
 
-        # Отправляем все сообщения одной асинхронной функцией
-        async def send_all_messages():
+        # --- Отправка в Telegram ---
+        async def send_all():
             for msg in messages:
                 await bot.send_message(chat_id=ADMIN_CHAT_ID, text=msg)
-
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         try:
-            loop.run_until_complete(send_all_messages())
+            loop.run_until_complete(send_all())
         finally:
             loop.close()
 
@@ -296,22 +304,14 @@ def webhook():
 
 @flask_app.route('/')
 def index():
-    return "✅ Бот Future Mission Book Bot работает!", 200
+    return "✅ Бот работает", 200
 
-# --- Запуск бота (polling) и Flask-сервера в разных потоках ---
-def run_bot():
-    logging.info("Запуск бота (polling)...")
-    app_bot.run_polling()
-
+# --- Запуск ---
 def run_flask():
-    logging.info("Запуск Flask-сервера...")
     flask_app.run(host='0.0.0.0', port=10000)
 
 if __name__ == "__main__":
-    # Запускаем Flask в отдельном потоке (daemon=True, чтобы завершался вместе с основным)
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
-    
-    # Бота запускаем в главном потоке, чтобы он корректно обрабатывал сигналы
-    logging.info("Запуск бота (polling) в главном потоке...")
+    logging.info("Запуск бота (polling)...")
     app_bot.run_polling()
