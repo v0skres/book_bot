@@ -3,20 +3,21 @@ import os
 import asyncio
 import threading
 import base64
+import requests
 from flask import Flask, request, jsonify
 from telegram import Bot
 from telegram.ext import Application, CommandHandler, MessageHandler, filters
 from dotenv import load_dotenv
-import requests
 
 load_dotenv()
 
 TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID"))
 
-# SendGrid настройки
-SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY")
-SENDGRID_FROM_EMAIL = os.getenv("SENDGRID_FROM_EMAIL")
+# Unisender настройки
+UNISENDER_API_KEY = os.getenv("UNISENDER_API_KEY")
+UNISENDER_FROM_EMAIL = os.getenv("UNISENDER_FROM_EMAIL")
+UNISENDER_FROM_NAME = os.getenv("UNISENDER_FROM_NAME", "Future Mission")
 
 BOOK_FILE_PATH = os.getenv("BOOK_FILE_PATH", "book.txt")
 
@@ -25,32 +26,32 @@ logging.basicConfig(level=logging.INFO)
 processed_orders = set()
 bot = Bot(token=TOKEN)
 
-# --- Функция отправки email через SendGrid ---
+# --- Функция отправки email через Unisender API ---
 def send_email_with_attachment(to_email, subject, body, attachment_path=None):
-    if not SENDGRID_API_KEY or not SENDGRID_FROM_EMAIL:
-        logging.error("SendGrid не настроен: отсутствуют API_KEY или FROM_EMAIL")
+    if not UNISENDER_API_KEY or not UNISENDER_FROM_EMAIL:
+        logging.error("Unisender не настроен: отсутствуют API_KEY или FROM_EMAIL")
         return False
 
     try:
-        headers = {
-            "Authorization": f"Bearer {SENDGRID_API_KEY}",
-            "Content-Type": "application/json"
-        }
-
-        data = {
-            "personalizations": [
-                {
-                    "to": [{"email": to_email}],
-                    "subject": subject
-                }
-            ],
-            "from": {"email": SENDGRID_FROM_EMAIL},
-            "content": [
-                {
-                    "type": "text/plain",
-                    "value": body
-                }
-            ]
+        # 1. Получаем список доступных полей формы
+        response = requests.post(
+            "https://api.unisender.com/ru/api/getFields",
+            data={
+                "api_key": UNISENDER_API_KEY,
+                "format": "json"
+            }
+        )
+        
+        # 2. Отправляем письмо через метод sendEmail
+        params = {
+            "api_key": UNISENDER_API_KEY,
+            "format": "json",
+            "sender_name": UNISENDER_FROM_NAME,
+            "sender_email": UNISENDER_FROM_EMAIL,
+            "subject": subject,
+            "body": body,
+            "recipients": to_email,
+            "recipients_type": "email"
         }
 
         # Добавляем вложение, если файл существует
@@ -59,35 +60,33 @@ def send_email_with_attachment(to_email, subject, body, attachment_path=None):
                 file_data = f.read()
                 encoded = base64.b64encode(file_data).decode()
                 filename = os.path.basename(attachment_path)
-                data["attachments"] = [
-                    {
-                        "content": encoded,
-                        "filename": filename,
-                        "type": "application/pdf",
-                        "disposition": "attachment"
-                    }
-                ]
-        else:
-            logging.warning(f"Файл вложения не найден: {attachment_path}")
+                # Unisender использует параметр attachment
+                params["attachment"] = [{
+                    "name": filename,
+                    "content": encoded,
+                    "type": "application/pdf"
+                }]
 
         response = requests.post(
-            "https://api.sendgrid.com/v3/mail/send",
-            headers=headers,
-            json=data
+            "https://api.unisender.com/ru/api/sendEmail",
+            data=params
         )
 
-        if response.status_code == 202:
-            logging.info(f"Письмо отправлено на {to_email} через SendGrid")
+        result = response.json()
+        logging.info(f"Unisender ответ: {result}")
+
+        if result.get("result", {}).get("status") == "ok":
+            logging.info(f"Письмо отправлено на {to_email} через Unisender")
             return True
         else:
-            logging.error(f"Ошибка SendGrid: {response.status_code} - {response.text}")
+            logging.error(f"Ошибка Unisender: {result}")
             return False
 
     except Exception as e:
-        logging.error(f"Ошибка отправки email через SendGrid: {e}")
+        logging.error(f"Ошибка отправки email через Unisender: {e}")
         return False
 
-# --- Обработчики команд бота ---
+# --- Остальной код бота (без изменений) ---
 async def start(update, context):
     await update.message.reply_text(
         "👋 Привет! Я бот для выдачи книги «О чём зудят твои таланты?».\n\n"
@@ -232,7 +231,7 @@ def webhook():
         else:
             order_type = 'unknown'
 
-        # --- Отправка email через SendGrid ---
+        # --- Отправка email через Unisender ---
         email_sent = False
         if order_type in ('electronic', 'both'):
             if client_email and client_email != 'Не указано' and client_email != '':
@@ -243,7 +242,7 @@ def webhook():
                     "Файл книги прикреплён к этому письму.\n\n"
                     "Приятного чтения!\n\n"
                     "С уважением,\n"
-                    "Команда Future Mission"
+                    f"{UNISENDER_FROM_NAME}"
                 )
                 email_sent = send_email_with_attachment(
                     to_email=client_email,
