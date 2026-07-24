@@ -147,7 +147,7 @@ app_bot.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_addre
 # --- Flask ---
 flask_app = Flask(__name__)
 
-@flask_app.route('/download/book.pdf')
+@flask_app.route('/download/book.txt')
 def download_book():
     try:
         return send_file(BOOK_FILE_PATH, as_attachment=False)
@@ -230,7 +230,7 @@ def webhook():
                     "С уважением,\n"
                     "Команда Future Mission"
                 )
-                book_link = "https://future-mission-book-bot.onrender.com/download/book.pdf"
+                book_link = "https://future-mission-book-bot.onrender.com/download/book.txt"
                 email_sent = send_email_with_link(
                     to_email=client_email,
                     subject=subject,
