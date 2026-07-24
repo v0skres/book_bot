@@ -2,9 +2,10 @@ import logging
 import os
 import asyncio
 import threading
-import base64
-import requests
-from flask import Flask, request, jsonify
+import smtplib
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from flask import Flask, request, jsonify, send_file
 from telegram import Bot
 from telegram.ext import Application, CommandHandler, MessageHandler, filters
 from dotenv import load_dotenv
@@ -14,69 +15,43 @@ load_dotenv()
 TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID"))
 
-# Unisender настройки
-UNISENDER_API_KEY = os.getenv("UNISENDER_API_KEY")
-UNISENDER_FROM_EMAIL = os.getenv("UNISENDER_FROM_EMAIL")
-UNISENDER_FROM_NAME = os.getenv("UNISENDER_FROM_NAME", "Future Mission")
+# SMTP настройки
+SMTP_HOST = os.getenv("SMTP_HOST")
+SMTP_PORT = int(os.getenv("SMTP_PORT", 465))
+SMTP_USER = os.getenv("SMTP_USER")
+SMTP_PASSWORD = os.getenv("SMTP_PASSWORD")
+SMTP_FROM = os.getenv("SMTP_FROM")
 
-BOOK_FILE_PATH = os.getenv("BOOK_FILE_PATH", "book.txt")
+BOOK_FILE_PATH = os.getenv("BOOK_FILE_PATH", "book.pdf")
 
 logging.basicConfig(level=logging.INFO)
 
 processed_orders = set()
 bot = Bot(token=TOKEN)
 
-# --- Функция отправки email через Unisender API (с вложением) ---
-def send_email_with_attachment(to_email, subject, body, attachment_path=None):
-    if not UNISENDER_API_KEY or not UNISENDER_FROM_EMAIL:
-        logging.error("Unisender не настроен: отсутствуют API_KEY или FROM_EMAIL")
+# --- Функция отправки email со ссылкой ---
+def send_email_with_link(to_email, subject, body, book_link):
+    if not SMTP_HOST or not SMTP_USER or not SMTP_PASSWORD:
+        logging.error("SMTP не настроен")
         return False
-
     try:
-        # Базовые параметры
-        params = {
-            "api_key": UNISENDER_API_KEY,
-            "format": "json",
-            "sender_name": UNISENDER_FROM_NAME,
-            "sender_email": UNISENDER_FROM_EMAIL,
-            "subject": subject,
-            "body": body,
-            "email": to_email,
-        }
+        msg = MIMEMultipart()
+        msg['From'] = SMTP_FROM
+        msg['To'] = to_email
+        msg['Subject'] = subject
+        full_body = body + f"\n\nСсылка для скачивания книги: {book_link}"
+        msg.attach(MIMEText(full_body, 'plain'))
 
-        # Добавляем вложение, если файл существует
-        if attachment_path and os.path.exists(attachment_path):
-            with open(attachment_path, "rb") as f:
-                file_data = f.read()
-                encoded = base64.b64encode(file_data).decode()
-                filename = os.path.basename(attachment_path)
-                # Параметр attachments должен быть массивом
-                # Ключ — имя файла, значение — содержимое в base64
-                params["attachments"] = {
-                    filename: encoded
-                }
-
-        response = requests.post(
-            "https://api.unisender.com/ru/api/sendEmail",
-            data=params
-        )
-
-        result = response.json()
-        logging.info(f"Unisender ответ: {result}")
-
-        # Проверяем успешность отправки
-        if result.get("result") and result["result"].get("status") == "ok":
-            logging.info(f"Письмо отправлено на {to_email} через Unisender")
-            return True
-        else:
-            logging.error(f"Ошибка Unisender: {result}")
-            return False
-
+        with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT) as server:
+            server.login(SMTP_USER, SMTP_PASSWORD)
+            server.sendmail(SMTP_FROM, to_email, msg.as_string())
+        logging.info(f"Письмо со ссылкой отправлено на {to_email}")
+        return True
     except Exception as e:
-        logging.error(f"Ошибка отправки email через Unisender: {e}")
+        logging.error(f"Ошибка отправки письма: {e}")
         return False
 
-# --- Функция для отправки сообщений в Telegram (синхронно) ---
+# --- Функция для отправки сообщений в Telegram ---
 def send_telegram_message(text):
     async def send():
         await bot.send_message(chat_id=ADMIN_CHAT_ID, text=text)
@@ -87,7 +62,7 @@ def send_telegram_message(text):
     finally:
         loop.close()
 
-# --- Обработчики команд бота ---
+# --- Обработчики команд бота (без изменений) ---
 async def start(update, context):
     await update.message.reply_text(
         "👋 Привет! Я бот для выдачи книги «О чём зудят твои таланты?».\n\n"
@@ -166,6 +141,14 @@ app_bot.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_addre
 # --- Flask ---
 flask_app = Flask(__name__)
 
+@flask_app.route('/download/book.pdf')
+def download_book():
+    try:
+        return send_file(BOOK_FILE_PATH, as_attachment=False)
+    except Exception as e:
+        logging.error(f"Ошибка скачивания файла: {e}")
+        return "Файл не найден", 404
+
 @flask_app.route('/webhook', methods=['POST'])
 def webhook():
     try:
@@ -227,7 +210,7 @@ def webhook():
         else:
             order_type = 'unknown'
 
-        # --- Отправка email через Unisender ---
+        # --- Отправка email со ссылкой на книгу ---
         email_sent = False
         if order_type in ('electronic', 'both'):
             if client_email and client_email != 'Не указано' and client_email != '':
@@ -235,16 +218,18 @@ def webhook():
                 body = (
                     f"Здравствуйте, {client_name}!\n\n"
                     "Благодарим за покупку электронной книги «О чём зудят твои таланты?».\n"
-                    "Файл книги прикреплён к этому письму.\n\n"
+                    "Вы можете скачать книгу по ссылке ниже.\n"
+                    "Ссылка действительна в течение 30 дней.\n\n"
                     "Приятного чтения!\n\n"
                     "С уважением,\n"
-                    f"{UNISENDER_FROM_NAME}"
+                    "Команда Future Mission"
                 )
-                email_sent = send_email_with_attachment(
+                book_link = "https://future-mission-book-bot.onrender.com/download/book.pdf"
+                email_sent = send_email_with_link(
                     to_email=client_email,
                     subject=subject,
                     body=body,
-                    attachment_path=BOOK_FILE_PATH
+                    book_link=book_link
                 )
             else:
                 logging.warning("Email клиента не указан, книга не отправлена")
@@ -266,21 +251,20 @@ def webhook():
 
         if order_type == 'electronic':
             if email_sent:
-                messages.append("✅ Электронная книга автоматически отправлена на email клиента.")
+                messages.append("✅ Ссылка на электронную книгу отправлена на email клиента.")
             else:
-                messages.append("⚠️ Электронная книга НЕ отправлена. Отправьте вручную.")
+                messages.append("⚠️ Письмо с книгой НЕ отправлено. Отправьте вручную.")
         elif order_type == 'printed':
             messages.append("📌 Печатная книга. Свяжитесь с клиентом для уточнения адреса ПВЗ.")
         elif order_type == 'both':
             if email_sent:
-                messages.append("✅ Электронная книга автоматически отправлена на email.")
+                messages.append("✅ Ссылка на электронную книгу отправлена на email.")
             else:
-                messages.append("⚠️ Электронная книга НЕ отправлена. Отправьте вручную.")
+                messages.append("⚠️ Письмо с книгой НЕ отправлено. Отправьте вручную.")
             messages.append("📌 Печатная книга. Свяжитесь с клиентом для уточнения адреса.")
         else:
             messages.append("⚠️ Тип заказа не определён, проверьте вручную.")
 
-        # Отправляем все сообщения
         for msg in messages:
             send_telegram_message(msg)
 
