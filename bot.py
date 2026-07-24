@@ -18,7 +18,7 @@ UNISENDER_API_KEY = os.getenv("UNISENDER_API_KEY")
 UNISENDER_FROM_EMAIL = os.getenv("UNISENDER_FROM_EMAIL")
 UNISENDER_FROM_NAME = os.getenv("UNISENDER_FROM_NAME", "Future Mission")
 
-BOOK_FILE_PATH = os.getenv("BOOK_FILE_PATH", "book.pdf")
+BOOK_FILE_PATH = os.getenv("BOOK_FILE_PATH", "book.txt")
 
 logging.basicConfig(level=logging.INFO)
 
