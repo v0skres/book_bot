@@ -26,13 +26,14 @@ logging.basicConfig(level=logging.INFO)
 processed_orders = set()
 bot = Bot(token=TOKEN)
 
-# --- Функция отправки email через Unisender API ---
+# --- Функция отправки email через Unisender API (с вложением) ---
 def send_email_with_attachment(to_email, subject, body, attachment_path=None):
     if not UNISENDER_API_KEY or not UNISENDER_FROM_EMAIL:
         logging.error("Unisender не настроен: отсутствуют API_KEY или FROM_EMAIL")
         return False
 
     try:
+        # Базовые параметры
         params = {
             "api_key": UNISENDER_API_KEY,
             "format": "json",
@@ -40,7 +41,7 @@ def send_email_with_attachment(to_email, subject, body, attachment_path=None):
             "sender_email": UNISENDER_FROM_EMAIL,
             "subject": subject,
             "body": body,
-            "email": to_email,   # правильное поле для получателя
+            "email": to_email,
         }
 
         # Добавляем вложение, если файл существует
@@ -49,14 +50,11 @@ def send_email_with_attachment(to_email, subject, body, attachment_path=None):
                 file_data = f.read()
                 encoded = base64.b64encode(file_data).decode()
                 filename = os.path.basename(attachment_path)
-                # Unisender использует параметр attachments (множественное число)
-                params["attachments"] = [
-                    {
-                        "filename": filename,
-                        "content": encoded,
-                        "type": "application/pdf"
-                    }
-                ]
+                # Параметр attachments должен быть массивом
+                # Ключ — имя файла, значение — содержимое в base64
+                params["attachments"] = {
+                    filename: encoded
+                }
 
         response = requests.post(
             "https://api.unisender.com/ru/api/sendEmail",
@@ -66,6 +64,7 @@ def send_email_with_attachment(to_email, subject, body, attachment_path=None):
         result = response.json()
         logging.info(f"Unisender ответ: {result}")
 
+        # Проверяем успешность отправки
         if result.get("result") and result["result"].get("status") == "ok":
             logging.info(f"Письмо отправлено на {to_email} через Unisender")
             return True
@@ -77,7 +76,18 @@ def send_email_with_attachment(to_email, subject, body, attachment_path=None):
         logging.error(f"Ошибка отправки email через Unisender: {e}")
         return False
 
-# --- Остальной код бота (без изменений) ---
+# --- Функция для отправки сообщений в Telegram (синхронно) ---
+def send_telegram_message(text):
+    async def send():
+        await bot.send_message(chat_id=ADMIN_CHAT_ID, text=text)
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        loop.run_until_complete(send())
+    finally:
+        loop.close()
+
+# --- Обработчики команд бота ---
 async def start(update, context):
     await update.message.reply_text(
         "👋 Привет! Я бот для выдачи книги «О чём зудят твои таланты?».\n\n"
@@ -140,12 +150,7 @@ async def handle_address(update, context):
     address = update.message.text
     if context.user_data.get('waiting_for_address', False):
         logging.info(f"Адрес получен от {user_id}: {address}")
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            loop.run_until_complete(bot.send_message(chat_id=ADMIN_CHAT_ID, text=f"📍 Печатная книга для {user_id}, адрес: {address}"))
-        finally:
-            loop.close()
+        send_telegram_message(f"📍 Печатная книга для {user_id}, адрес: {address}")
         await update.message.reply_text("✅ Спасибо! Ваш адрес передан.")
         context.user_data['waiting_for_address'] = False
 
@@ -275,16 +280,9 @@ def webhook():
         else:
             messages.append("⚠️ Тип заказа не определён, проверьте вручную.")
 
-        # --- Отправка в Telegram ---
-        async def send_all():
-            for msg in messages:
-                await bot.send_message(chat_id=ADMIN_CHAT_ID, text=msg)
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            loop.run_until_complete(send_all())
-        finally:
-            loop.close()
+        # Отправляем все сообщения
+        for msg in messages:
+            send_telegram_message(msg)
 
         return jsonify({"status": "ok"}), 200
 
