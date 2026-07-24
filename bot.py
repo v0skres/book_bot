@@ -33,16 +33,6 @@ def send_email_with_attachment(to_email, subject, body, attachment_path=None):
         return False
 
     try:
-        # 1. Получаем список доступных полей формы
-        response = requests.post(
-            "https://api.unisender.com/ru/api/getFields",
-            data={
-                "api_key": UNISENDER_API_KEY,
-                "format": "json"
-            }
-        )
-        
-        # 2. Отправляем письмо через метод sendEmail
         params = {
             "api_key": UNISENDER_API_KEY,
             "format": "json",
@@ -50,8 +40,7 @@ def send_email_with_attachment(to_email, subject, body, attachment_path=None):
             "sender_email": UNISENDER_FROM_EMAIL,
             "subject": subject,
             "body": body,
-            "recipients": to_email,
-            "recipients_type": "email"
+            "email": to_email,   # правильное поле для получателя
         }
 
         # Добавляем вложение, если файл существует
@@ -60,12 +49,14 @@ def send_email_with_attachment(to_email, subject, body, attachment_path=None):
                 file_data = f.read()
                 encoded = base64.b64encode(file_data).decode()
                 filename = os.path.basename(attachment_path)
-                # Unisender использует параметр attachment
-                params["attachment"] = [{
-                    "name": filename,
-                    "content": encoded,
-                    "type": "application/pdf"
-                }]
+                # Unisender использует параметр attachments (множественное число)
+                params["attachments"] = [
+                    {
+                        "filename": filename,
+                        "content": encoded,
+                        "type": "application/pdf"
+                    }
+                ]
 
         response = requests.post(
             "https://api.unisender.com/ru/api/sendEmail",
@@ -75,7 +66,7 @@ def send_email_with_attachment(to_email, subject, body, attachment_path=None):
         result = response.json()
         logging.info(f"Unisender ответ: {result}")
 
-        if result.get("result", {}).get("status") == "ok":
+        if result.get("result") and result["result"].get("status") == "ok":
             logging.info(f"Письмо отправлено на {to_email} через Unisender")
             return True
         else:
