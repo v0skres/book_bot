@@ -15,9 +15,8 @@ load_dotenv()
 TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID"))
 
-# SMTP настройки
 SMTP_HOST = os.getenv("SMTP_HOST")
-SMTP_PORT = int(os.getenv("SMTP_PORT", 465))
+SMTP_PORT = int(os.getenv("SMTP_PORT", 587))
 SMTP_USER = os.getenv("SMTP_USER")
 SMTP_PASSWORD = os.getenv("SMTP_PASSWORD")
 SMTP_FROM = os.getenv("SMTP_FROM")
@@ -29,7 +28,7 @@ logging.basicConfig(level=logging.INFO)
 processed_orders = set()
 bot = Bot(token=TOKEN)
 
-# --- Функция отправки email со ссылкой ---
+# --- Отправка письма через SMTP с TLS (порт 587) ---
 def send_email_with_link(to_email, subject, body, book_link):
     if not SMTP_HOST or not SMTP_USER or not SMTP_PASSWORD:
         logging.error("SMTP не настроен")
@@ -42,7 +41,8 @@ def send_email_with_link(to_email, subject, body, book_link):
         full_body = body + f"\n\nСсылка для скачивания книги: {book_link}"
         msg.attach(MIMEText(full_body, 'plain'))
 
-        with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT) as server:
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
+            server.starttls()
             server.login(SMTP_USER, SMTP_PASSWORD)
             server.sendmail(SMTP_FROM, to_email, msg.as_string())
         logging.info(f"Письмо со ссылкой отправлено на {to_email}")
@@ -51,7 +51,7 @@ def send_email_with_link(to_email, subject, body, book_link):
         logging.error(f"Ошибка отправки письма: {e}")
         return False
 
-# --- Функция для отправки сообщений в Telegram ---
+# --- Отправка сообщений в Telegram (синхронная, с новым циклом) ---
 def send_telegram_message(text):
     async def send():
         await bot.send_message(chat_id=ADMIN_CHAT_ID, text=text)
@@ -210,7 +210,7 @@ def webhook():
         else:
             order_type = 'unknown'
 
-        # --- Отправка email со ссылкой на книгу ---
+        # --- Отправка email со ссылкой ---
         email_sent = False
         if order_type in ('electronic', 'both'):
             if client_email and client_email != 'Не указано' and client_email != '':
@@ -265,6 +265,7 @@ def webhook():
         else:
             messages.append("⚠️ Тип заказа не определён, проверьте вручную.")
 
+        # Отправляем все сообщения через синхронную функцию
         for msg in messages:
             send_telegram_message(msg)
 
