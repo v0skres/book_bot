@@ -2,9 +2,7 @@ import logging
 import os
 import asyncio
 import threading
-import smtplib
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
+import requests
 from flask import Flask, request, jsonify, send_file
 from telegram import Bot
 from telegram.ext import Application, CommandHandler, MessageHandler, filters
@@ -15,11 +13,10 @@ load_dotenv()
 TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID"))
 
-SMTP_HOST = os.getenv("SMTP_HOST")
-SMTP_PORT = int(os.getenv("SMTP_PORT", 587))
-SMTP_USER = os.getenv("SMTP_USER")
-SMTP_PASSWORD = os.getenv("SMTP_PASSWORD")
-SMTP_FROM = os.getenv("SMTP_FROM")
+# Unisender настройки
+UNISENDER_API_KEY = os.getenv("UNISENDER_API_KEY")
+UNISENDER_FROM_EMAIL = os.getenv("UNISENDER_FROM_EMAIL")
+UNISENDER_FROM_NAME = os.getenv("UNISENDER_FROM_NAME", "Future Mission")
 
 BOOK_FILE_PATH = os.getenv("BOOK_FILE_PATH", "book.pdf")
 
@@ -28,30 +25,39 @@ logging.basicConfig(level=logging.INFO)
 processed_orders = set()
 bot = Bot(token=TOKEN)
 
-# --- Отправка письма через SMTP с TLS (порт 587) ---
+# --- Отправка письма через Unisender API (без вложения, только ссылка) ---
 def send_email_with_link(to_email, subject, body, book_link):
-    if not SMTP_HOST or not SMTP_USER or not SMTP_PASSWORD:
-        logging.error("SMTP не настроен")
+    if not UNISENDER_API_KEY:
+        logging.error("Unisender API ключ не настроен")
         return False
     try:
-        msg = MIMEMultipart()
-        msg['From'] = SMTP_FROM
-        msg['To'] = to_email
-        msg['Subject'] = subject
-        full_body = body + f"\n\nСсылка для скачивания книги: {book_link}"
-        msg.attach(MIMEText(full_body, 'plain'))
-
-        with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
-            server.starttls()
-            server.login(SMTP_USER, SMTP_PASSWORD)
-            server.sendmail(SMTP_FROM, to_email, msg.as_string())
-        logging.info(f"Письмо со ссылкой отправлено на {to_email}")
-        return True
+        params = {
+            "api_key": UNISENDER_API_KEY,
+            "format": "json",
+            "sender_name": UNISENDER_FROM_NAME,
+            "sender_email": UNISENDER_FROM_EMAIL,
+            "subject": subject,
+            "body": body + f"\n\nСсылка для скачивания книги: {book_link}",
+            "email": to_email,
+        }
+        response = requests.post(
+            "https://api.unisender.com/ru/api/sendEmail",
+            data=params,
+            timeout=30
+        )
+        result = response.json()
+        logging.info(f"Unisender ответ: {result}")
+        if result.get("result") and result["result"].get("status") == "ok":
+            logging.info(f"Письмо со ссылкой отправлено на {to_email}")
+            return True
+        else:
+            logging.error(f"Ошибка Unisender: {result}")
+            return False
     except Exception as e:
-        logging.error(f"Ошибка отправки письма: {e}")
+        logging.error(f"Ошибка отправки письма через Unisender: {e}")
         return False
 
-# --- Отправка сообщений в Telegram (синхронная, с новым циклом) ---
+# --- Отправка сообщений в Telegram (синхронная) ---
 def send_telegram_message(text):
     async def send():
         await bot.send_message(chat_id=ADMIN_CHAT_ID, text=text)
@@ -62,7 +68,7 @@ def send_telegram_message(text):
     finally:
         loop.close()
 
-# --- Обработчики команд бота (без изменений) ---
+# --- Обработчики команд бота ---
 async def start(update, context):
     await update.message.reply_text(
         "👋 Привет! Я бот для выдачи книги «О чём зудят твои таланты?».\n\n"
@@ -210,7 +216,7 @@ def webhook():
         else:
             order_type = 'unknown'
 
-        # --- Отправка email со ссылкой ---
+        # --- Отправка email со ссылкой через Unisender ---
         email_sent = False
         if order_type in ('electronic', 'both'):
             if client_email and client_email != 'Не указано' and client_email != '':
@@ -265,7 +271,6 @@ def webhook():
         else:
             messages.append("⚠️ Тип заказа не определён, проверьте вручную.")
 
-        # Отправляем все сообщения через синхронную функцию
         for msg in messages:
             send_telegram_message(msg)
 
