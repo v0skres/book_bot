@@ -13,51 +13,52 @@ load_dotenv()
 TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID"))
 
-# Unisender настройки
-UNISENDER_API_KEY = os.getenv("UNISENDER_API_KEY")
-UNISENDER_FROM_EMAIL = os.getenv("UNISENDER_FROM_EMAIL")
-UNISENDER_FROM_NAME = os.getenv("UNISENDER_FROM_NAME", "Future Mission")
+# Resend настройки
+RESEND_API_KEY = os.getenv("RESEND_API_KEY")
+RESEND_FROM_EMAIL = os.getenv("RESEND_FROM_EMAIL")  # подтверждённый отправитель
 
 BOOK_FILE_PATH = os.getenv("BOOK_FILE_PATH", "book.txt")
+BOOK_LINK = "https://future-mission-book-bot.onrender.com/download/book.txt"
 
 logging.basicConfig(level=logging.INFO)
 
 processed_orders = set()
 bot = Bot(token=TOKEN)
 
-# --- Отправка письма через Unisender API (без вложения, только ссылка) ---
+# --- Отправка email через Resend API ---
 def send_email_with_link(to_email, subject, body, book_link):
-    if not UNISENDER_API_KEY:
-        logging.error("Unisender API ключ не настроен")
+    if not RESEND_API_KEY or not RESEND_FROM_EMAIL:
+        logging.error("Resend не настроен")
         return False
     try:
-        params = {
-            "api_key": UNISENDER_API_KEY,
-            "format": "json",
-            "sender_name": UNISENDER_FROM_NAME,
-            "sender_email": UNISENDER_FROM_EMAIL,
-            "subject": subject,
-            "body": body + f"\n\nСсылка для скачивания книги: {book_link}",
-            "email": to_email,
-        }
+        full_body = body + f"\n\nСсылка для скачивания книги: {book_link}"
         response = requests.post(
-            "https://api.unisender.com/ru/api/sendEmail",
-            data=params,
+            "https://api.resend.com/emails",
+            headers={
+                "Authorization": f"Bearer {RESEND_API_KEY}",
+                "Content-Type": "application/json"
+            },
+            json={
+                "from": RESEND_FROM_EMAIL,
+                "to": to_email,
+                "subject": subject,
+                "text": full_body
+            },
             timeout=30
         )
         result = response.json()
-        logging.info(f"Unisender ответ: {result}")
-        if result.get("result") and result["result"].get("status") == "ok":
-            logging.info(f"Письмо со ссылкой отправлено на {to_email}")
+        logging.info(f"Resend ответ: {result}")
+        if response.status_code == 200 and result.get("id"):
+            logging.info(f"Письмо отправлено на {to_email} через Resend")
             return True
         else:
-            logging.error(f"Ошибка Unisender: {result}")
+            logging.error(f"Ошибка Resend: {result}")
             return False
     except Exception as e:
-        logging.error(f"Ошибка отправки письма через Unisender: {e}")
+        logging.error(f"Ошибка отправки через Resend: {e}")
         return False
 
-# --- Отправка сообщений в Telegram (синхронная) ---
+# --- Отправка сообщений в Telegram ---
 def send_telegram_message(text):
     async def send():
         await bot.send_message(chat_id=ADMIN_CHAT_ID, text=text)
@@ -216,7 +217,7 @@ def webhook():
         else:
             order_type = 'unknown'
 
-        # --- Отправка email со ссылкой через Unisender ---
+        # --- Отправка email через Resend ---
         email_sent = False
         if order_type in ('electronic', 'both'):
             if client_email and client_email != 'Не указано' and client_email != '':
@@ -230,12 +231,11 @@ def webhook():
                     "С уважением,\n"
                     "Команда Future Mission"
                 )
-                book_link = "https://future-mission-book-bot.onrender.com/download/book.txt"
                 email_sent = send_email_with_link(
                     to_email=client_email,
                     subject=subject,
                     body=body,
-                    book_link=book_link
+                    book_link=BOOK_LINK
                 )
             else:
                 logging.warning("Email клиента не указан, книга не отправлена")
@@ -257,16 +257,16 @@ def webhook():
 
         if order_type == 'electronic':
             if email_sent:
-                messages.append("✅ Ссылка на электронную книгу отправлена на email клиента.")
+                messages.append("✅ Электронная книга автоматически отправлена на email клиента.")
             else:
-                messages.append("⚠️ Письмо с книгой НЕ отправлено. Отправьте вручную.")
+                messages.append("⚠️ Электронная книга НЕ отправлена. Отправьте вручную.")
         elif order_type == 'printed':
             messages.append("📌 Печатная книга. Свяжитесь с клиентом для уточнения адреса ПВЗ.")
         elif order_type == 'both':
             if email_sent:
-                messages.append("✅ Ссылка на электронную книгу отправлена на email.")
+                messages.append("✅ Электронная книга автоматически отправлена на email.")
             else:
-                messages.append("⚠️ Письмо с книгой НЕ отправлено. Отправьте вручную.")
+                messages.append("⚠️ Электронная книга НЕ отправлена. Отправьте вручную.")
             messages.append("📌 Печатная книга. Свяжитесь с клиентом для уточнения адреса.")
         else:
             messages.append("⚠️ Тип заказа не определён, проверьте вручную.")
